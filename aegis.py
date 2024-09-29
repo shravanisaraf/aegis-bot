@@ -1,74 +1,83 @@
+GOOGLE_API_KEY="AIzaSyA6ZRuYPgsPAqjDEhIgXCUft176Xmv0C9k"
 import streamlit as st
+from PyPDF2 import PdfReader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 import os
+
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 import google.generativeai as genai
-from datetime import datetime
 
-# Programmatically set the API key (Replace with your actual API key)
-os.environ['GEMINI_API_KEY'] = 'AIzaSyA6ZRuYPgsPAqjDEhIgXCUft176Xmv0C9k'
-genai.configure(api_key=os.environ['GEMINI_API_KEY'])
+from langchain.vectorstores import FAISS
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.chains.question_answering import load_qa_chain
+from langchain.prompts import PromptTemplate
 
-# Initialize the GenerativeModel
-model = genai.GenerativeModel('gemini-1.5-flash')
+from dotenv import load_dotenv
 
-# Function to interact with the chatbot
-def chat_with_bot(user_input):
-    # Initialize a new chat session (history can be used to track past conversations if needed)
-    chat = model.start_chat(history=[])
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+
+def get_pdf_text(pdf_docs):
+    text = ""
+    for pdf in pdf_docs:
+        pdf_reader = PdfReader(pdf)
+        for page in pdf_reader.pages:
+            text += page.extract_text() 
+    return text
+
+def get_text_chunks(text):
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=10000,
+        chunk_overlap=1000,
+        length_function=len
+    )
+    chunks=text_splitter.split_text(text)
+    return chunks
+  
+def get_vectorstore(text_chunks):
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    vectorstore = FAISS.from_texts(text_chunks, embedding=embeddings)
+    vectorstore.save_local("faiss_index")
+
+def get_conversational_chain():
+    prompt_template = """ Your name is Aegis. Answer the question as detailed as possible from the provided context, make sure to provide all the details, if the answer is not in the provided context, say "Answer is not available in the context", don't provide incorrect answer.
+    Context: \n {context} \n 
+    Question: \n {question} \n 
+    Answer:
+    """
+    model=ChatGoogleGenerativeAI(model="gemini-pro",temperature=0.3)
+
+    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
+    chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
+    return chain
+
+def user_input(user_question):
+  embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+  new_db = FAISS.load_local("faiss_index", embeddings)
+  docs = new_db.similarity_search(user_question)
+
+  chain = get_conversational_chain()
+
+  response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
+  print(response)
+  st.write("Reply: ", response["output_text"])
+
+def main():
+    st.set_page_config("Chat with Multiple PDF")
+    st.header("Chat with PDFs using Aegis")
+
+    user_question = st.text_input("Ask a question about your documents:")
+    if user_question:
+        user_input(user_question)
     
-    # Send the user message and get the response
-    response = chat.send_message(user_input)
+    with st.sidebar:
+        st.title("Menu:")
+        pdf_docs = st.file_uploader("Upload your PDFs here and click on 'Submit'", accept_multiple_files=True)
+        if st.button("Submit & Process"):
+            with st.spinner("Processing..."):
+                raw_text = get_pdf_text(pdf_docs)
+                text_chunks = get_text_chunks(raw_text)
+                get_vectorstore(text_chunks)
+                st.success("Done!")
+if __name__ == "__main__":
+    main()
     
-    # Return the bot's text response
-    return response.text
-
-# Set up the Streamlit app
-st.set_page_config(page_title="Aegis Chatbot", layout="centered")
-st.title("Welcome to Aegis - Your Gemini-powered Chatbot")
-
-# Session state to store chat history across user inputs
-if 'messages' not in st.session_state:
-    st.session_state['messages'] = []
-
-# Input box for the user to type their message
-user_input = st.text_input("Type your message and press Enter:")
-
-# Display chat history
-st.write("### Chat History:")
-for msg in st.session_state['messages']:
-    if msg['role'] == 'user':
-        st.write(f"**You**: {msg['content']}")
-    else:
-        st.write(f"**Bot**: {msg['content']}")
-
-# Process user input and display bot response
-if user_input:
-    # Append the user's message to chat history
-    st.session_state['messages'].append({"role": "user", "content": user_input})
-    
-    # Generate a response from the bot
-    bot_response = chat_with_bot(user_input)
-    
-    # Append the bot's response to chat history
-    st.session_state['messages'].append({"role": "bot", "content": bot_response})
-    
-    # Re-render the chat history
-    st.write("### Chat History:")
-    for msg in st.session_state['messages']:
-        if msg['role'] == 'user':
-            st.write(f"**You**: {msg['content']}")
-        else:
-            st.write(f"**Bot**: {msg['content']}")
-
-# Extra Feature: User profile information
-with st.sidebar:
-    st.header("User Profile")
-    name = st.text_input("Name:")
-    if name:
-        st.write(f"Hello, {name}!")
-    
-    mood = st.selectbox("How are you feeling?", ["Happy", "Sad", "Neutral"])
-    st.write(f"You're feeling {mood.lower()} today.")
-
-# Display the time of the last message sent
-if st.session_state['messages']:
-    st.sidebar.write(f"Last message sent at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
